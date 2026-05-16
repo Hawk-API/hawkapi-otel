@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-16
+
+### Security (breaking)
+
+- `OTelPlugin.insecure` now defaults to `False`. Previously it defaulted to
+  `True`, which silently shipped traces over plaintext in production
+  (CWE-319). Pass `insecure=True` explicitly for local collectors.
+- The OTel middleware no longer forwards arbitrary request headers into the
+  W3C propagation extractor — only `traceparent`, `tracestate`, and
+  `baggage` are passed through. This stops `Authorization` / `Cookie` from
+  ending up in OTel internals (CWE-200).
+- Query strings recorded on the `url.query` span attribute now mask
+  sensitive parameters (`token`, `key`, `api_key`, `password`, `secret`,
+  `access_token`, `refresh_token`) with `***`. Extend the list via the new
+  `OTelPlugin(sensitive_query_params=...)` argument.
+
+### Added
+
+- `OTelPlugin(log_level=...)` so the OTLP log handler can filter low-noise
+  records before they are exported.
+
 ## [0.1.0] - 2026-04-19
 
 ### Added

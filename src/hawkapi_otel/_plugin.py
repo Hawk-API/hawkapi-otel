@@ -30,7 +30,7 @@ class OTelPlugin(Plugin):
         service_version: str | None = None,
         endpoint: str = "http://localhost:4317",
         protocol: str = "grpc",
-        insecure: bool = True,
+        insecure: bool = False,
         headers: dict[str, str] | None = None,
         resource_attributes: dict[str, str] | None = None,
         traces_sampler: str = "parentbased_always_on",
@@ -39,7 +39,16 @@ class OTelPlugin(Plugin):
         enable_logs: bool = False,
         console_exporter: bool = False,
         record_exceptions: bool = True,
+        sensitive_query_params: frozenset[str] | None = None,
+        log_level: int = logging.WARNING,
     ) -> None:
+        """Construct an OTelPlugin.
+
+        Note: ``insecure`` defaults to ``False`` (TLS expected) — flip it to
+        ``True`` explicitly for local OTLP collectors over plaintext. Prior
+        versions defaulted to ``True``, which was unsafe in production
+        deployments (CWE-319).
+        """
         self._service_name = service_name
         self._service_version = service_version
         self._endpoint = endpoint
@@ -53,6 +62,8 @@ class OTelPlugin(Plugin):
         self._enable_logs = enable_logs
         self._console_exporter = console_exporter
         self._record_exceptions = record_exceptions
+        self.sensitive_query_params = sensitive_query_params
+        self._log_level = log_level
 
         self._tracer_provider: TracerProvider | None = None
         self._meter_provider: MeterProvider | None = None
@@ -144,4 +155,7 @@ class OTelPlugin(Plugin):
         self._logger_provider = logger_provider
 
         handler = LoggingHandler(logger_provider=logger_provider)
+        # Bound the noise floor so unrelated DEBUG/INFO logs don't get
+        # shipped to the OTel collector.
+        handler.setLevel(self._log_level)
         logging.getLogger().addHandler(handler)

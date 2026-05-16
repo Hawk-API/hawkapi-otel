@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import parse_qsl, quote
 
 from hawkapi.middleware.base import Middleware
 from hawkapi.requests.request import Request
@@ -15,16 +16,63 @@ from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapProp
 
 _PROPAGATOR = TraceContextTextMapPropagator()
 
+# Only these headers are forwarded into the OTel propagation extractor.
+# Forwarding arbitrary request headers (e.g. ``Authorization``) into OTel's
+# carrier dict can leak credentials into downstream propagation handling
+# and trace logs (CWE-200).
+PROPAGATION_HEADERS: frozenset[str] = frozenset(["traceparent", "tracestate", "baggage"])
+
+_DEFAULT_SENSITIVE_QUERY_PARAMS: frozenset[str] = frozenset(
+    {
+        "token",
+        "key",
+        "api_key",
+        "password",
+        "secret",
+        "access_token",
+        "refresh_token",
+    }
+)
+_REDACTED_VALUE = "***"
+
+
+def _redact_query(qs: str, sensitive: frozenset[str] | None) -> str:
+    if not qs:
+        return qs
+    targets = sensitive if sensitive is not None else _DEFAULT_SENSITIVE_QUERY_PARAMS
+    targets = frozenset(t.lower() for t in targets)
+    parts: list[str] = []
+    for k, v in parse_qsl(qs, keep_blank_values=True):
+        if k.lower() in targets:
+            parts.append(f"{quote(k, safe='')}={_REDACTED_VALUE}")
+        else:
+            parts.append(f"{quote(k, safe='')}={quote(v, safe='')}")
+    return "&".join(parts)
+
+
+def _plugin_for(request: Request) -> Any:
+    app = request.scope.get("app") if isinstance(request.scope, dict) else None
+    if app is None:
+        return None
+    for attr in ("plugins", "_plugins"):
+        plugins = getattr(app, attr, None)
+        if plugins is None:
+            continue
+        for plugin in plugins:
+            if plugin.__class__.__name__ == "OTelPlugin":
+                return plugin
+    return None
+
 
 class OTelMiddleware(Middleware):
     """Starts an OTel server span for every HTTP request."""
 
     async def before_request(self, request: Request) -> Request | Response | JSONResponse | None:
         """Extract incoming trace context, start a server span, set HTTP attributes."""
-        # Build a carrier from request headers for W3C propagation
-        carrier: dict[str, str] = {}
-        for key, value in request.headers:
-            carrier[key.lower()] = value
+        # Only forward W3C trace-context / baggage headers into the extractor.
+        carrier: dict[str, str] = {
+            k.lower(): v for k, v in request.headers if k.lower() in PROPAGATION_HEADERS
+        }
 
         ctx = propagate.extract(carrier)
         token = otel_context.attach(ctx)
@@ -50,7 +98,11 @@ class OTelMiddleware(Middleware):
         qs_raw = request.query_string
         qs: str = qs_raw.decode("latin-1") if qs_raw else ""
         if qs:
-            span.set_attribute("url.query", qs)
+            plugin = _plugin_for(request)
+            sensitive: frozenset[str] | None = (
+                getattr(plugin, "sensitive_query_params", None) if plugin is not None else None
+            )
+            span.set_attribute("url.query", _redact_query(qs, sensitive))
 
         ua = request.headers.get("user-agent")
         if ua:
